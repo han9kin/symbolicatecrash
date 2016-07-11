@@ -1,0 +1,111 @@
+#!/usr/bin/env ruby
+
+require 'optparse'
+require 'tempfile'
+require 'http/parser'
+
+
+$the_tool = File.join(File.dirname($0), "symbolicatecrash")
+$use_http = true
+
+
+def symbolicate(crashlog)
+    begin
+        file = Tempfile.new("symbolicatecrash")
+        file.write(crashlog)
+        file.close
+        `#{$the_tool} "#{file.path}" 2>&1`
+    ensure
+        file.close
+        file.unlink
+    end
+end
+
+
+begin
+
+    # define options
+
+    opts = OptionParser.new do | opts |
+        opts.banner  = "Usage: symbolicatecrash_http [OPTIONS]"
+        opts.version = "1.0"
+
+        opts.on("--tool PATH", "symbolicatecrash script path") do | path |
+            $the_tool = path
+        end
+
+        opts.on("--no-http", "pipe is not http") do
+            $use_http = false
+        end
+
+        opts.on("--verbose", "enables additional output") do
+            $verbose = true
+        end
+    end
+
+    # parse options
+
+    if ARGV.size > 0
+        begin
+            opts.parse!
+        rescue OptionParser::InvalidOption => e
+            log e
+            exit(false)
+        end
+    end
+
+    # symbolicate crash log
+
+    $the_tool  = "\"#{$the_tool}\""
+    $the_tool += " -v" if $verbose
+
+    if $use_http
+        crashlog = ""
+        parser   = Http::Parser.new
+
+        parser.on_headers_complete = proc do
+            crashlog = ""
+        end
+
+        parser.on_body = proc do | chunk |
+            crashlog << chunk
+        end
+
+        parser.on_message_complete = proc do | env |
+            case parser.http_method
+            when "PUT"
+                crashlog = symbolicate(crashlog)
+                stat = "200 OK"
+            when "OPTIONS"
+                crashlog = ""
+                stat = "200 OK"
+            else
+                crashlog = ""
+                stat = "405 Method Not Allowed"
+            end
+
+            $stdout.write("HTTP/1.1 #{stat}\r\n")
+            $stdout.write("Access-Control-Allow-Origin: *\r\n")
+            $stdout.write("Access-Control-Allow-Methods: PUT\r\n")
+            $stdout.write("Access-Control-Allow-Headers: accept, origin, content-disposition, content-type\r\n")
+            $stdout.write("Content-Type: text/plain\r\n")
+            $stdout.write("Content-Length: #{crashlog.size}\r\n")
+            $stdout.write("Connection: keep-alive\r\n\r\n")
+            $stdout.write(crashlog)
+            $stdout.flush
+        end
+
+        begin
+            loop do
+                parser << $stdin.readpartial(4096)
+            end
+        rescue EOFError
+        end
+    else
+        crashlog = $stdin.read
+        $stdout.write(symbolicate(crashlog))
+        $stdout.flush
+    end
+
+rescue Interrupt
+end

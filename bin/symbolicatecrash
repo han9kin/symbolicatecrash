@@ -1,0 +1,266 @@
+#!/usr/bin/env ruby
+
+require 'optparse'
+
+
+$inputs  = []
+$outputs = []
+$images  = {}
+$dsyms   = {}
+$frames  = {}
+$hwmodel = nil
+$arch    = nil
+$osname  = nil
+$osver   = nil
+$osbuild = nil
+$logs    = ""
+
+
+def parse_inputs
+    images_started = false
+
+    $inputs.each do | line |
+        if images_started
+            # match for binary images
+            if m = line.match(/^\s*(?<begin_addr>0x[0-9a-f]+)\s+-\s+(?<end_addr>0x[0-9a-f]+)\s+\+?(?<name>\S+)\s+(?<version>\([^)]*\))?(?<arch>\S+)?\s+\<(?<uuid>[0-9A-Fa-f\-]+)\>\s+(?<path>.+)$/)
+                $images[m[:name]] = m
+            end
+            $outputs << line
+        else
+            # match for frame addresses
+            if m = line.match(/^(?<frame_index>[0-9]+)\s+(?<image_name>\S+)\s+(?<frame_addr>0x[0-9a-f]+)\s+(?<image_addr>0x[0-9a-f]+)\s+\+\s+(?<image_offset>[0-9]+)$/)
+                $outputs << m
+            else
+                $outputs << line
+            end
+
+            # match for hardware model
+            if m = line.match(/^Hardware Model:\s+(?<hwmodel>\S+)/)
+                $hwmodel = m[:hwmodel]
+            end
+
+            # match for arch
+            if m = line.match(/^Code Type:\s+(?<arch>[A-Z0-9\-]+)/)
+                case m[:arch]
+                when "ARM"
+                    $arch = "arm"
+                when "ARM-64"
+                    $arch = "arm64"
+                when "X86"
+                    $arch = "i386"
+                when "X86-64"
+                    $arch = "x86_64"
+                end
+            end
+
+            # match for os version
+            if m = line.match(/^OS Version:\s+(?<osname>[A-Za-z ]+[A-Za-z])\s+(?<osver>[0-9.]+)(\s+\((Build )?(?<osbuild>\S+)\))?/)
+                $osname  = m[:osname]
+                $osver   = m[:osver]
+                $osbuild = m[:osbuild]
+            end
+        end
+
+        if line.start_with?("Binary Images:")
+            images_started = true
+        end
+    end
+end
+
+
+def address_i(str)
+    if str.start_with?("0x")
+        str[2..-1].to_i(16)
+    else
+        str.to_i
+    end
+end
+
+
+def uuid(str)
+    if str.length == 36
+        str.upcase
+    elsif str.length == 32
+        [str[0,8], str[8,4], str[12,4], str[16,4], str[20,12]].join("-").upcase
+    else
+        str
+    end
+end
+
+
+def check_dsym(path, arch, uuid)
+    if `/usr/bin/xcrun dwarfdump --arch #{arch} --uuid "#{path}"`.match("^UUID\:\ #{uuid}")
+        true
+    else
+        false
+    end
+end
+
+
+def dsym_for_image(image, arch)
+    uuid = uuid(image[:uuid])
+    dsym = $dsyms[uuid]
+
+    if dsym
+        if dsym.empty?
+            return nil
+        else
+            return dsym
+        end
+    else
+        # check file at path
+        if File.exists?(image[:path])
+            dsym = image[:path]
+            if check_dsym(dsym, arch, uuid)
+                $logs << "> Found dSYM #{dsym}\n"
+                $dsyms[uuid] = dsym
+                return dsym
+            end
+        end
+
+        # search in the device support
+        files = []
+        files += Dir.glob("#{Dir.home}/Library/Developer/Xcode/*DeviceSupport/#{$hwmodel} #{$osver} (#{$osbuild})/Symbols*/**/#{image[:name]}") if $hwmodel && $osver && $osbuild
+        files += Dir.glob("#{Dir.home}/Library/Developer/Xcode/*DeviceSupport/#{$osver} (#{$osbuild})/Symbols*/**/#{image[:name]}") if $osver && $osbuild
+        files += Dir.glob("#{Dir.home}/Library/Developer/Xcode/*DeviceSupport/#{$osver}/Symbols*/**/#{image[:name]}") if $osver
+        files += Dir.glob("#{Dir.home}/Library/Developer/Xcode/*DeviceSupport/#{$osbuild}/Symbols*/**/#{image[:name]}") if $osbuild
+
+        files.each do | dsym |
+            if check_dsym(dsym, arch, uuid)
+                $logs << "> Found dSYM #{dsym}\n"
+                $dsyms[uuid] = dsym
+                return dsym
+            end
+        end
+
+        # search with spotlight
+        `/usr/bin/mdfind -0 "com_apple_xcode_dsym_uuids == #{uuid}"`.split("\0").each do | path |
+            `/usr/bin/mdls -name com_apple_xcode_dsym_paths "#{path}"`.gsub(/^com_apple_xcode_dsym_paths\ \= \(/, "").gsub(/\)$/, "").split(",").each do | subpath |
+                dsym = File.join(path, subpath.gsub(/^\s*\"/, "").gsub(/\"\s*$/, ""))
+                if check_dsym(dsym, arch, uuid)
+                    $logs << "> Found dSYM #{dsym}\n"
+                    $dsyms[uuid] = dsym
+                    return dsym
+                end
+            end
+        end
+
+        # not found
+        $logs << "> Did not find dsym for #{image[:name]} <#{uuid}>\n"
+        $dsyms[uuid] = ""
+        return nil
+    end
+end
+
+
+def image_for_frame(frame)
+    image = $images[frame[:image_name]] || $images.values.select do | image |
+        address_i(image[:begin_addr]) == address_i(frame[:image_addr])
+    end.first
+end
+
+
+def symbolicate_frames
+    frames = {}
+
+    $outputs.each do | frame |
+        if frame.is_a?(MatchData)
+            if image = image_for_frame(frame)
+                arch = image[:arch] || $arch
+                if dsym = dsym_for_image(image, arch)
+                    frames[frame[:frame_addr]] = { :dsym => dsym, :arch => arch, :image_addr => frame[:image_addr] }
+                end
+            end
+        end
+    end
+
+    frames.each do | addr, vals |
+        unless $frames[addr]
+            addrs = []
+
+            frames.each do | addr2, vals2 |
+                addrs << addr2 if vals == vals2
+            end
+
+            symbolicated = `/usr/bin/xcrun atos -o "#{vals[:dsym]}" -arch #{vals[:arch]} -l #{vals[:image_addr]} #{addrs.join(" ")}`.gsub(/\s*\(in \S+\)/, "").lines
+
+            if addrs.size == symbolicated.size
+                addrs.each_index do | index |
+                    $frames[addrs[index]] = symbolicated[index].strip
+                end
+            end
+        end
+    end
+end
+
+
+def replace_outputs
+    $outputs.each_index do | index |
+        frame = $outputs[index]
+
+        if frame.is_a?(MatchData)
+            if symbolicated = $frames[frame[:frame_addr]]
+                $outputs[index] = frame.string[0, frame.begin(:image_addr)] + symbolicated
+            end
+        end
+    end
+end
+
+
+begin
+
+    $outfile = nil
+
+    opts = OptionParser.new do | opts |
+        opts.banner  = "Usage: symbolicatecrash [OPTIONS] <LOGFILE>"
+        opts.version = "1.0"
+
+        opts.on("-o", "--output OUTPUT_FILE", "The symbolicated log will be written to OUTPUT_FILE. Defaults to \"-\" (i.e. stdout) if not specified") do | file |
+            $outfile = file if file != "-"
+        end
+
+        opts.on("-v", "--verbose", "enables additional output") do
+            $verbose = true
+        end
+    end
+
+    if ARGV.size > 0
+        begin
+            opts.parse!
+        rescue OptionParser::InvalidOption => e
+            puts e
+            exit(false)
+        end
+    end
+
+    if (ARGV.size > 0) && (ARGV[0] != "-")
+        File.open(ARGV[0], "r") do | f |
+            $inputs = f.read.lines
+        end
+    else
+        $inputs = $stdin.read.lines
+    end
+
+    parse_inputs
+    symbolicate_frames
+    replace_outputs
+
+    if $outfile
+        out = File.open($outfile, "w")
+    else
+        out = $stdout
+    end
+
+    $outputs.each do | line |
+        out.puts line
+    end
+
+    if $verbose
+        puts unless $outfile
+        puts $logs
+    end
+
+rescue Interrupt
+rescue Exception => e
+    puts e
+end
