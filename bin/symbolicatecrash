@@ -30,6 +30,8 @@ def parse_inputs
             # match for frame addresses
             if m = line.match(/^(?<frame_index>[0-9]+)\s+(?<image_name>\S+)\s+(?<frame_addr>0x[0-9a-f]+)\s+(?<image_addr>0x[0-9a-f]+)\s+\+\s+(?<image_offset>[0-9]+)$/)
                 $outputs << m
+            elsif $force && m = line.match(/^(?<frame_index>[0-9]+)\s+(?<image_name>\S+)\s+(?<frame_addr>0x[0-9a-f]+)[^0-9]?.+$/)
+                $outputs << m
             else
                 $outputs << line
             end
@@ -168,7 +170,8 @@ def symbolicate_frames
             if image = image_for_frame(frame)
                 arch = image[:arch] || $arch
                 if dsym = dsym_for_image(image, arch)
-                    frames[frame[:frame_addr]] = { :dsym => dsym, :arch => arch, :image_addr => frame[:image_addr] }
+                    image_addr = frame.names.include?(:image_addr) ? frame[:image_addr] : image[:begin_addr]
+                    frames[frame[:frame_addr]] = { :dsym => dsym, :arch => arch, :image_addr => image_addr }
                 end
             end
         end
@@ -200,7 +203,7 @@ def replace_outputs
 
         if frame.is_a?(MatchData)
             if symbolicated = $frames[frame[:frame_addr]]
-                $outputs[index] = frame.string[0, frame.begin(:image_addr)] + symbolicated
+                $outputs[index] = frame.string[0, frame.end(:frame_addr)] + ' ' + symbolicated
             end
         end
     end
@@ -214,6 +217,10 @@ begin
     opts = OptionParser.new do | opts |
         opts.banner  = "Usage: symbolicatecrash [OPTIONS] <LOGFILE>"
         opts.version = "1.0"
+
+        opts.on("-f", "--force", "force re-symbolicate") do
+            $force = true
+        end
 
         opts.on("-o", "--output OUTPUT_FILE", "The symbolicated log will be written to OUTPUT_FILE. Defaults to \"-\" (i.e. stdout) if not specified") do | file |
             $outfile = file if file != "-"

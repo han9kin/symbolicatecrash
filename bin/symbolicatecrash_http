@@ -38,6 +38,10 @@ begin
             $use_http = false
         end
 
+        opts.on("--force", "force re-symbolicate") do
+            $force = true
+        end
+
         opts.on("--verbose", "enables additional output") do
             $verbose = true
         end
@@ -57,6 +61,7 @@ begin
     # symbolicate crash log
 
     $the_tool  = "\"#{$the_tool}\""
+    $the_tool += " -f" if $force
     $the_tool += " -v" if $verbose
 
     if $use_http

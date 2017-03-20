@@ -10,6 +10,7 @@
 	<array>
 		<string>/usr/bin/ruby</string>
 		<string>/Users/ci/tools/symbolicatecrash/bin/symbolicatecrash_http</string>
+		<string>--force</string>
 		<string>--verbose</string>
 	</array>
 	<key>SessionCreate</key>
