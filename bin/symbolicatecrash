@@ -28,7 +28,7 @@ def parse_inputs
             $outputs << line
         else
             # match for frame addresses
-            if m = line.match(/^(?<frame_index>[0-9]+)\s+(?<image_name>\S+)\s+(?<frame_addr>0x[0-9a-f]+)\s+(?<image_addr>0x[0-9a-f]+)\s+\+\s+(?<image_offset>[0-9]+)$/)
+            if m = line.match(/^(?<frame_index>[0-9]+)\s+(?<image_name>\S+)\s+(?<frame_addr>0x[0-9a-f]+)\s+(?<image_addr>0(x[0-9a-f]+)?)\s+\+\s+(?<image_offset>[0-9]+)$/)
                 $outputs << m
             elsif $force && m = line.match(/^(?<frame_index>[0-9]+)\s+(?<image_name>\S+)\s+(?<frame_addr>0x[0-9a-f]+)[^0-9]?.+$/)
                 $outputs << m
