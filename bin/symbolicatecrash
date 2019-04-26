@@ -91,7 +91,14 @@ end
 
 
 def check_dsym(path, arch, uuid)
-    if `/usr/bin/xcrun dwarfdump --arch #{arch} --uuid "#{path}"`.match("^UUID\:\ #{uuid}")
+    archsMap = {
+        "armv7" => ["armv7", "arm"],
+        "arm64" => ["arm64", "aarch64"],
+    }
+
+    archs = (archsMap[arch] || [arch]).map { | arch | "--arch #{arch}" }
+
+    if `/usr/bin/xcrun dwarfdump #{archs.join(" ")} --uuid "#{path}"`.match("^UUID\:\ #{uuid}")
         true
     else
         false
