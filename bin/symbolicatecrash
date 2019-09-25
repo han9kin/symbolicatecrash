@@ -13,6 +13,7 @@ $arch    = nil
 $osname  = nil
 $osver   = nil
 $osbuild = nil
+$xcarchs = nil
 $logs    = ""
 
 
@@ -22,7 +23,7 @@ def parse_inputs
     $inputs.each do | line |
         if images_started
             # match for binary images
-            if m = line.match(/^\s*(?<begin_addr>0x[0-9a-f]+)\s+-\s+(?<end_addr>0x[0-9a-f]+)\s+\+?(?<name>\S+)\s+(?<version>\([^)]*\))?(?<arch>\S+)?\s+\<(?<uuid>[0-9A-Fa-f\-]+)\>\s+(?<path>.+)$/)
+            if m = line.match(/^\s*(?<begin_addr>0x[0-9a-f]+)\s+-\s+(?<end_addr>0x[0-9a-f]+)\s+(?<main>\+)?(?<name>\S+)\s+(?<version>\([^)]*\))?(?<arch>\S+)?\s+\<(?<uuid>[0-9A-Fa-f\-]+)\>\s+(?<path>.+)$/)
                 $images[m[:name]] = m
             end
             $outputs << line
@@ -90,6 +91,26 @@ def uuid(str)
 end
 
 
+def xcarchives()
+    unless $xcarchs
+        for image in $images.values
+            if image[:main] == "+"
+                $xcarchs = `/usr/bin/mdfind -0 "com_apple_xcode_dsym_uuids == #{uuid(image[:uuid])}"`.split("\0").select do | path |
+                    path.end_with?(".xcarchive")
+                end
+                break
+            end
+        end
+    end
+
+    unless $xcarchs
+        $xcarchs = []
+    end
+
+    return $xcarchs
+end
+
+
 def check_dsym(path, arch, uuid)
     archsMap = {
         "armv7" => ["armv7", "arm"],
@@ -127,30 +148,35 @@ def dsym_for_image(image, arch)
             end
         end
 
-        # search in the device support
-        files = []
-        files += Dir.glob("#{Dir.home}/Library/Developer/Xcode/*DeviceSupport/#{$hwmodel} #{$osver} (#{$osbuild})/Symbols*/**/#{image[:name]}") if $hwmodel && $osver && $osbuild
-        files += Dir.glob("#{Dir.home}/Library/Developer/Xcode/*DeviceSupport/#{$osver} (#{$osbuild})/Symbols*/**/#{image[:name]}") if $osver && $osbuild
-        files += Dir.glob("#{Dir.home}/Library/Developer/Xcode/*DeviceSupport/#{$osver}/Symbols*/**/#{image[:name]}") if $osver
-        files += Dir.glob("#{Dir.home}/Library/Developer/Xcode/*DeviceSupport/#{$osbuild}/Symbols*/**/#{image[:name]}") if $osbuild
-
-        files.each do | dsym |
-            if check_dsym(dsym, arch, uuid)
-                $logs << "> Found dSYM #{dsym}\n"
-                $dsyms[uuid] = dsym
-                return dsym
-            end
-        end
-
         # search with spotlight
         `/usr/bin/mdfind -0 "com_apple_xcode_dsym_uuids == #{uuid}"`.split("\0").each do | path |
-            `/usr/bin/mdls -name com_apple_xcode_dsym_paths "#{path}"`.gsub(/^com_apple_xcode_dsym_paths\ \= \(/, "").gsub(/\)$/, "").split(",").each do | subpath |
+            `/Usr/bin/mdls -name com_apple_xcode_dsym_paths "#{path}"`.gsub(/^com_apple_xcode_dsym_paths\ \= \(/, "").gsub(/\)$/, "").split(",").each do | subpath |
                 dsym = File.join(path, subpath.gsub(/^\s*\"/, "").gsub(/\"\s*$/, ""))
                 if check_dsym(dsym, arch, uuid)
                     $logs << "> Found dSYM #{dsym}\n"
                     $dsyms[uuid] = dsym
                     return dsym
                 end
+            end
+        end
+
+        # search in the device support & xcarchives
+        files = []
+        files += Dir.glob("#{Dir.home}/Library/Developer/Xcode/*DeviceSupport/#{$hwmodel} #{$osver} (#{$osbuild})/Symbols*/**/#{image[:name]}") if $hwmodel && $osver && $osbuild
+        files += Dir.glob("#{Dir.home}/Library/Developer/Xcode/*DeviceSupport/#{$osver} (#{$osbuild})/Symbols*/**/#{image[:name]}") if $osver && $osbuild
+        files += Dir.glob("#{Dir.home}/Library/Developer/Xcode/*DeviceSupport/#{$osver}/Symbols*/**/#{image[:name]}") if $osver
+        files += Dir.glob("#{Dir.home}/Library/Developer/Xcode/*DeviceSupport/#{$osbuild}/Symbols*/**/#{image[:name]}") if $osbuild
+
+        xcarchives().each do | path |
+            files += Dir.glob("#{path}/*Support*/**/#{image[:name]}")
+            files += Dir.glob("#{path}/Products/**/#{image[:name]}")
+        end
+
+        files.each do | dsym |
+            if check_dsym(dsym, arch, uuid)
+                $logs << "> Found dSYM #{dsym}\n"
+                $dsyms[uuid] = dsym
+                return dsym
             end
         end
 
