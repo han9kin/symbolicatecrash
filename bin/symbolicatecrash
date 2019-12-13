@@ -33,6 +33,15 @@ def parse_inputs
                 $outputs << m
             elsif $force && m = line.match(/^(?<frame_index>[0-9]+)\s+(?<image_name>\S+)\s+(?<frame_addr>0x[0-9a-f]+)[^0-9]?.+$/)
                 $outputs << m
+            elsif m = line.match(/^\((?<addresses>(\s*0x[0-9a-f]+\s*)+)\)/) # addresses of last exception backtrace
+                index = 0
+                m[:addresses].split(' ').each do | address |
+                    $outputs << {
+                        :frame_index => index,
+                        :frame_addr => address
+                    }
+                    index += 1
+                end
             else
                 $outputs << line
             end
@@ -163,7 +172,7 @@ def dsym_for_image(image, arch)
         # search in the device support & xcarchives
         files = []
         files += Dir.glob("#{Dir.home}/Library/Developer/Xcode/*DeviceSupport/#{$hwmodel} #{$osver} (#{$osbuild})/Symbols*/**/#{image[:name]}") if $hwmodel && $osver && $osbuild
-        files += Dir.glob("#{Dir.home}/Library/Developer/Xcode/*DeviceSupport/#{$osver} (#{$osbuild})/Symbols*/**/#{image[:name]}") if $osver && $osbuild
+        files += Dir.glob("#{Dir.home}/Library/Developer/Xcode/*DeviceSupport/#{$osver} (#{$osbuild})*/Symbols*/**/#{image[:name]}") if $osver && $osbuild
         files += Dir.glob("#{Dir.home}/Library/Developer/Xcode/*DeviceSupport/#{$osver}/Symbols*/**/#{image[:name]}") if $osver
         files += Dir.glob("#{Dir.home}/Library/Developer/Xcode/*DeviceSupport/#{$osbuild}/Symbols*/**/#{image[:name]}") if $osbuild
 
@@ -190,7 +199,13 @@ end
 
 def image_for_frame(frame)
     image = $images[frame[:image_name]] || $images.values.select do | image |
-        address_i(image[:begin_addr]) == address_i(frame[:image_addr])
+        if addr = frame[:image_addr]
+            address_i(image[:begin_addr]) == address_i(frame[:image_addr])
+        elsif addr = frame[:frame_addr]
+            (address_i(image[:begin_addr]) <= address_i(addr)) && (address_i(image[:end_addr]) > address_i(addr))
+        else
+            false
+        end
     end.first
 end
 
@@ -204,7 +219,16 @@ def symbolicate_frames
                 arch = image[:arch] || $arch
                 if dsym = dsym_for_image(image, arch)
                     image_addr = frame.names.include?(:image_addr) ? frame[:image_addr] : image[:begin_addr]
-                    frames[frame[:frame_addr]] = { :dsym => dsym, :arch => arch, :image_addr => image_addr }
+                    frames[frame[:frame_addr]] = { :dsym => dsym, :arch => arch, :image_addr => image_addr, :image_name => image[:name] }
+                end
+            end
+        elsif frame.is_a?(Hash)
+            if image = image_for_frame(frame)
+                arch = image[:arch] || $arch
+                if dsym = dsym_for_image(image, arch)
+                    frames[frame[:frame_addr]] = { :dsym => dsym, :arch => arch, :image_addr => image[:begin_addr], :image_name => image[:name] }
+                else
+                    frames[frame[:frame_addr]] = { :dsym => "", :arch => arch, :image_addr => image[:begin_addr], :image_name => image[:name] }
                 end
             end
         end
@@ -218,11 +242,17 @@ def symbolicate_frames
                 addrs << addr2 if vals == vals2
             end
 
-            symbolicated = `/usr/bin/xcrun atos -o "#{vals[:dsym]}" -arch #{vals[:arch]} -l #{vals[:image_addr]} #{addrs.join(" ")}`.gsub(/\s*\(in \S+\)/, "").lines
-
-            if addrs.size == symbolicated.size
+            if vals[:dsym].empty?
                 addrs.each_index do | index |
-                    $frames[addrs[index]] = symbolicated[index].strip
+                    $frames[addrs[index]] = { :image_name => vals[:image_name], :symbolicated => "%s + %d" % [vals[:image_addr], address_i(addrs[index]) - address_i(vals[:image_addr])] }
+                end
+            else
+                symbolicated = `/usr/bin/xcrun atos -o "#{vals[:dsym]}" -arch #{vals[:arch]} -l #{vals[:image_addr]} #{addrs.join(" ")}`.gsub(/\s*\(in \S+\)/, "").lines
+
+                if addrs.size == symbolicated.size
+                    addrs.each_index do | index |
+                        $frames[addrs[index]] = { :image_name => vals[:image_name], :symbolicated => symbolicated[index].strip }
+                    end
                 end
             end
         end
@@ -235,8 +265,12 @@ def replace_outputs
         frame = $outputs[index]
 
         if frame.is_a?(MatchData)
-            if symbolicated = $frames[frame[:frame_addr]]
-                $outputs[index] = frame.string[0, frame.end(:frame_addr)] + ' ' + symbolicated
+            if result = $frames[frame[:frame_addr]]
+                $outputs[index] = frame.string[0, frame.end(:frame_addr)] + ' ' + result[:symbolicated]
+            end
+        elsif frame.is_a?(Hash)
+            if result = $frames[frame[:frame_addr]]
+                $outputs[index] = "%-3d %-30s\t%s %s" % [frame[:frame_index], result[:image_name], frame[:frame_addr], result[:symbolicated]]
             end
         end
     end
