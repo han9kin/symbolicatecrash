@@ -199,7 +199,7 @@ end
 
 def image_for_frame(frame)
     image = $images[frame[:image_name]] || $images.values.select do | image |
-        if frame.names.include?(:image_addr)
+        if (frame.is_a?(MatchData) && frame.names.include?(:image_addr)) || (frame.is_a?(Hash) && frame.has_key?(:image_addr))
             address_i(image[:begin_addr]) == address_i(frame[:image_addr])
         elsif addr = frame[:frame_addr]
             (address_i(image[:begin_addr]) <= address_i(addr)) && (address_i(image[:end_addr]) > address_i(addr))
